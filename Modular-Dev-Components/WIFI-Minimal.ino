@@ -3,8 +3,8 @@
 #define RX 10
 #define TX 11
 
-String AP = "Ask Me Who";       // CHANGE ME
-String PASS = "89331693"; // CHANGE ME
+String AP = "Abi-Oppo-A18";       // CHANGE ME
+String PASS = ""; // CHANGE ME
 
 int countTrueCommand;
 int countTimeCommand; 
