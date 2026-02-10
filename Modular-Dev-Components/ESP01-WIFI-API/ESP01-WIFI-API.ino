@@ -9,8 +9,8 @@
 // ============================================
 // WIFI CREDENTIALS
 // ============================================
-String WIFI_SSID = "Abi-Oppo-A18";    
-String WIFI_PASS = "ilovecutemen";  // Leave empty for open networks
+String WIFI_SSID = "YOUR_SSID";       // Replace with your WiFi SSID
+String WIFI_PASS = "YOUR_PASSWORD";   // Replace with your WiFi password (leave empty for open networks)
 
 // ============================================
 // SETUP

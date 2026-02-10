@@ -3,8 +3,8 @@
 #define RX 10
 #define TX 11
 
-String AP = "Abi-Oppo-A18";       // CHANGE ME
-String PASS = ""; // CHANGE ME
+String AP = "YOUR_SSID";       // CHANGE ME
+String PASS = "YOUR_PASSWORD"; // CHANGE ME
 
 int countTrueCommand;
 int countTimeCommand; 
