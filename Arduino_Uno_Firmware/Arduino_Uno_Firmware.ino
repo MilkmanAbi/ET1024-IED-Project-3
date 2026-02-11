@@ -2,13 +2,12 @@
  * Urban Farming Robot - Arduino Uno Firmware
  *
  * Hardware: Arduino Uno + IED Shield
- * Sensors: DHT22, HC-SR04 Ultrasonic, IR Line Trackers x2, Capacitive Moisture
- * Actuators: 2x DC Motors (H-bridge), MG996R Servo (linear actuator)
+ * Sensors: DHT22, HC-SR04 Ultrasonic, IR Line Trackers x2, Digital Moisture
+ * Actuators: 2x DC Motors (H-bridge)
  * Display: 16x2 I2C LCD
  * Comms: SoftwareSerial to ESP32 (9600 baud)
  *
- * A0 is muxed between IR Right (D7=LOW) and Moisture (D7=HIGH).
- * Servo library conflicts with Timer1 PWM on D9/D10 - attach/detach around use.
+ * Servo/actuator moved to ESP32 (GPIO23) to avoid Timer1 conflict with D9 PWM.
  */
 
 // ============================================================
@@ -18,14 +17,13 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <SoftwareSerial.h>
-#include <Servo.h>
 #include <DHT.h>
 
 // Motor Driver Pins (IED Shield hardwired - direction swapped to match wiring)
-#define MOTOR_A_IN1       6   // Left motor forward
-#define MOTOR_A_IN2       9   // Left motor reverse
-#define MOTOR_B_IN3       5   // Right motor forward
-#define MOTOR_B_IN4       3   // Right motor reverse
+#define MOTOR_A_IN1       9   // Left motor forward
+#define MOTOR_A_IN2       6   // Left motor reverse
+#define MOTOR_B_IN3       3   // Right motor forward
+#define MOTOR_B_IN4       5   // Right motor reverse
 
 // Ultrasonic Sensor (HC-SR04)
 #define ULTRASONIC_TRIG  11
@@ -39,12 +37,8 @@
 #define DHT_PIN           2
 #define DHT_TYPE       DHT22
 
-// Moisture Sensor (muxed on A0)
-#define MOISTURE_ANALOG  A0
-#define MOISTURE_POWER    7   // D7: LOW=IR mode, HIGH=moisture mode
-
-// Servo (Linear Actuator)
-#define SERVO_PIN         4
+// Moisture Sensor (digital only — D0 output from sensor module)
+#define MOISTURE_PIN      7   // LOW=moist, HIGH=dry
 
 // LED Indicator
 #define LED_PIN          13
@@ -57,15 +51,17 @@
 // 2. CONSTANTS
 // ============================================================
 
-// Actuator servo angles
-#define ACTUATOR_UP_ANGLE    90   // Retracted (neutral)
-#define ACTUATOR_DOWN_ANGLE 125   // Extended into soil (90+35)
-#define ACTUATOR_TRAVEL_MS  500   // Time budget for 35-degree travel
-#define MOISTURE_SETTLE_MS  100   // Settle time after powering moisture sensor
-
 // Motor speeds
-#define BASE_SPEED         255
-#define TURN_SPEED_FACTOR  0.4f  // Inner wheel at 40% for smooth turns
+#define BASE_SPEED         120   // Used by line-follow / search
+#define MANUAL_SPEED       130   // Reduced for manual to avoid ESP32 brownout
+#define TURN_SPEED         120    // Outer wheel speed during turns (inner brakes)
+
+// Motor ramping (soft-start to limit inrush current)
+#define RAMP_STEP           10   // PWM increment per tick
+#define RAMP_INTERVAL_MS    20   // ms between ramp ticks (~280ms 0→100)
+
+// ESP32 heartbeat watchdog
+#define HEARTBEAT_TIMEOUT 5000   // Stop motors if no heartbeat for 5s
 
 // Sensor intervals (ms)
 #define IR_INTERVAL         50
@@ -88,34 +84,36 @@ enum RobotState {
   STATE_IDLE,
   STATE_LINE_SEARCH,
   STATE_LINE_FOLLOW,
-  STATE_MANUAL,
-  STATE_ACTUATOR_DOWN,
-  STATE_ACTUATOR_UP,
-  STATE_MOISTURE_READ
+  STATE_MANUAL
 };
 
 RobotState currentState = STATE_MANUAL;
-RobotState resumeState  = STATE_MANUAL;  // State to return to after actuator ops
 
 // Objects
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 SoftwareSerial espSerial(ESP_RX, ESP_TX);
-Servo actuatorServo;
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // Motor state
 bool motorsRunning = false;
 
+// Motor ramping state
+int targetLeftSpeed  = 0;
+int targetRightSpeed = 0;
+int curLeftSpeed     = 0;
+int curRightSpeed    = 0;
+unsigned long lastRampTime = 0;
+
+// ESP32 heartbeat watchdog
+unsigned long lastHeartbeat = 0;
+
 // Sensor data
 float temperature = 0.0f;
 float humidity    = 0.0f;
-int   moisturePct = 0;
+bool  moistureWet = false;  // true = moist, false = dry
 int   distanceCm  = 999;
 bool  irLeft      = false;  // false(0) = on line (white), true(1) = off line (black)
 bool  irRight     = false;
-
-// Actuator
-bool actuatorIsDown = false;
 
 // Obstacle reporting (avoid spamming)
 bool obstacleSent = false;
@@ -125,8 +123,6 @@ unsigned long lastIRRead        = 0;
 unsigned long lastUltrasonic    = 0;
 unsigned long lastTelemetry     = 0;
 unsigned long lastLCDUpdate     = 0;
-unsigned long actuatorStartTime = 0;
-unsigned long moistureStartTime = 0;
 
 // Serial command buffer
 char cmdBuf[CMD_BUF_SIZE];
@@ -157,11 +153,10 @@ void setup() {
 
   // IR sensors (analog pins as digital input)
   pinMode(IR_LEFT_PIN, INPUT);
-  // IR_RIGHT_PIN (A0) configured dynamically via mux
+  pinMode(IR_RIGHT_PIN, INPUT);
 
-  // Moisture power gate
-  pinMode(MOISTURE_POWER, OUTPUT);
-  digitalWrite(MOISTURE_POWER, LOW);  // Default: IR mode on A0
+  // Moisture sensor (digital input: LOW=moist, HIGH=dry)
+  pinMode(MOISTURE_PIN, INPUT);
 
   // LED
   pinMode(LED_PIN, OUTPUT);
@@ -188,12 +183,13 @@ void setup() {
   delay(1500);
   lcd.clear();
 
+  lastHeartbeat = millis();  // Grace period on boot
+
   // Send initial state so ESP32 knows we're alive
   readDHT();
   distanceCm = readUltrasonic();
   sendTelemetry();
   espSerial.println(F("MODE:MAN"));
-  espSerial.println(F("A:UP"));
 }
 
 // ============================================================
@@ -205,6 +201,15 @@ void loop() {
 
   // Always: read incoming serial commands
   readSerialCommands();
+
+  // Motor soft-ramp: gradually move current PWM toward target
+  updateMotorRamp(now);
+
+  // Heartbeat watchdog: if ESP32 went silent, stop motors (likely brownout)
+  if (motorsRunning && (now - lastHeartbeat > HEARTBEAT_TIMEOUT)) {
+    stopMotors();
+    espSerial.println(F("K:WDOG"));  // Tell ESP32 watchdog triggered
+  }
 
   // State-dependent processing
   switch (currentState) {
@@ -229,7 +234,7 @@ void loop() {
           if (irLeft || irRight) {
             // Line found - switch to line following
             currentState = STATE_LINE_FOLLOW;
-            resumeState = STATE_LINE_FOLLOW;
+
             espSerial.println(F("MODE:LF"));
           }
         }
@@ -270,57 +275,22 @@ void loop() {
       }
       break;
 
-    case STATE_ACTUATOR_DOWN:
-      if (now - actuatorStartTime >= ACTUATOR_TRAVEL_MS) {
-        actuatorIsDown = true;
-        actuatorServo.detach();  // Restore Timer1 PWM on D9/D10
-        espSerial.println(F("A:DOWN"));
-        // Auto-trigger moisture read
-        digitalWrite(MOISTURE_POWER, HIGH);
-        moistureStartTime = now;
-        currentState = STATE_MOISTURE_READ;
-      }
-      break;
-
-    case STATE_ACTUATOR_UP:
-      if (now - actuatorStartTime >= ACTUATOR_TRAVEL_MS) {
-        actuatorIsDown = false;
-        actuatorServo.detach();  // Restore Timer1 PWM on D9/D10
-        espSerial.println(F("A:UP"));
-        currentState = resumeState;
-      }
-      break;
-
-    case STATE_MOISTURE_READ:
-      if (now - moistureStartTime >= MOISTURE_SETTLE_MS) {
-        int raw = analogRead(MOISTURE_ANALOG);
-        moisturePct = map(raw, 1023, 0, 0, 100);  // Capacitive: wet=low value
-        if (moisturePct < 0) moisturePct = 0;
-        if (moisturePct > 100) moisturePct = 100;
-        digitalWrite(MOISTURE_POWER, LOW);  // Back to IR mode
-        sendTelemetry();
-        // Stay idle (actuator still down, waiting for pull-up command)
-        currentState = STATE_IDLE;
-      }
-      break;
-
     case STATE_IDLE:
     default:
       break;
   }
 
-  // Periodic: DHT22 + telemetry (every 3s)
+  // Periodic: DHT22 + moisture + telemetry (every 3s)
   if (now - lastTelemetry >= TELEMETRY_INTERVAL) {
     lastTelemetry = now;
     readDHT();
-    if (currentState != STATE_MOISTURE_READ) {
-      // Read ultrasonic for telemetry if not recently read
-      if (now - lastUltrasonic >= ULTRASONIC_INTERVAL) {
-        lastUltrasonic = now;
-        distanceCm = readUltrasonic();
-      }
-      sendTelemetry();
+    moistureWet = (digitalRead(MOISTURE_PIN) == LOW);  // Read every cycle
+    // Read ultrasonic for telemetry if not recently read
+    if (now - lastUltrasonic >= ULTRASONIC_INTERVAL) {
+      lastUltrasonic = now;
+      distanceCm = readUltrasonic();
     }
+    sendTelemetry();
   }
 
   // Periodic: LCD update (every 500ms)
@@ -364,26 +334,20 @@ void processCommand(const char* cmd) {
       // Manual mode
       stopMotors();
       currentState = STATE_MANUAL;
-      resumeState = STATE_MANUAL;
+
       espSerial.println(F("MODE:MAN"));
     } else if (cmd[2] == '0') {
       // Line follow mode
       currentState = STATE_LINE_FOLLOW;
-      resumeState = STATE_LINE_FOLLOW;
       espSerial.println(F("MODE:LF"));
     }
     espSerial.println(F("K:OK"));
     return;
   }
 
-  // Actuator commands
-  if (cmd[0] == 'D' && cmd[1] == ':') {
-    if (cmd[2] == '1') {
-      startActuatorDown();
-    } else if (cmd[2] == '0') {
-      startActuatorUp();
-    }
-    espSerial.println(F("K:OK"));
+  // Heartbeat from ESP32
+  if (cmd[0] == 'H' && cmd[1] == '\0') {
+    lastHeartbeat = millis();
     return;
   }
 
@@ -413,7 +377,7 @@ void processCommand(const char* cmd) {
       // Start: search for line then follow
       stopMotors();
       currentState = STATE_LINE_SEARCH;
-      resumeState = STATE_LINE_SEARCH;
+
       espSerial.println(F("MODE:SEARCH"));
       espSerial.println(F("K:OK"));
       break;
@@ -421,7 +385,7 @@ void processCommand(const char* cmd) {
       // Stop: go to manual mode
       stopMotors();
       currentState = STATE_MANUAL;
-      resumeState = STATE_MANUAL;
+
       espSerial.println(F("MODE:MAN"));
       espSerial.println(F("K:OK"));
       break;
@@ -429,7 +393,7 @@ void processCommand(const char* cmd) {
       readDHT();
       distanceCm = readUltrasonic();
       sendTelemetry();
-      // Also send current mode and actuator state
+      // Also send current mode
       if (currentState == STATE_MANUAL || currentState == STATE_IDLE) {
         espSerial.println(F("MODE:MAN"));
       } else if (currentState == STATE_LINE_SEARCH) {
@@ -437,8 +401,6 @@ void processCommand(const char* cmd) {
       } else {
         espSerial.println(F("MODE:LF"));
       }
-      delay(5);
-      espSerial.println(actuatorIsDown ? F("A:DOWN") : F("A:UP"));
       break;
     default:
 #ifdef DEBUG
@@ -450,15 +412,17 @@ void processCommand(const char* cmd) {
 }
 
 // ============================================================
-// 7. MOTOR CONTROL
+// 7. MOTOR CONTROL  (with soft-start ramping)
 // ============================================================
 
+// Set desired motor speeds — ramp loop will gradually apply them
 void controlMotors(int leftSpeed, int rightSpeed) {
-  // Detach servo to restore Timer1 PWM on pin 9 (left motor)
-  if (actuatorServo.attached()) {
-    actuatorServo.detach();
-  }
+  targetLeftSpeed  = leftSpeed;
+  targetRightSpeed = rightSpeed;
+}
 
+// Directly apply PWM to H-bridge (called by ramp loop only)
+void applyMotorPWM(int leftSpeed, int rightSpeed) {
   // Left Motor
   if (leftSpeed > 0) {
     analogWrite(MOTOR_A_IN1, leftSpeed);
@@ -486,25 +450,54 @@ void controlMotors(int leftSpeed, int rightSpeed) {
   motorsRunning = (leftSpeed != 0 || rightSpeed != 0);
 }
 
+// Ramp one channel toward its target
+int rampToward(int current, int target) {
+  if (current == target) return current;
+  // Stopping is always immediate (safety)
+  if (target == 0) return 0;
+  if (current < target) return min(current + (int)RAMP_STEP, target);
+  return max(current - (int)RAMP_STEP, target);
+}
+
+// Called every loop iteration — applies gradual speed changes
+void updateMotorRamp(unsigned long now) {
+  if (now - lastRampTime < RAMP_INTERVAL_MS) return;
+  lastRampTime = now;
+
+  int newLeft  = rampToward(curLeftSpeed, targetLeftSpeed);
+  int newRight = rampToward(curRightSpeed, targetRightSpeed);
+
+  if (newLeft != curLeftSpeed || newRight != curRightSpeed) {
+    curLeftSpeed  = newLeft;
+    curRightSpeed = newRight;
+    applyMotorPWM(curLeftSpeed, curRightSpeed);
+  }
+}
+
+// --- Manual mode: reduced speed (90/255) ---
+
 void moveForward() {
-  controlMotors(BASE_SPEED, BASE_SPEED);
+  controlMotors(MANUAL_SPEED, MANUAL_SPEED);
 }
 
 void moveBackward() {
-  controlMotors(-BASE_SPEED, -BASE_SPEED);
+  controlMotors(-MANUAL_SPEED, -MANUAL_SPEED);
 }
 
 void turnLeft() {
-  int inner = (int)(BASE_SPEED * TURN_SPEED_FACTOR);
-  controlMotors(inner, BASE_SPEED);
+  controlMotors(0, TURN_SPEED);  // Brake left, drive right
 }
 
 void turnRight() {
-  int inner = (int)(BASE_SPEED * TURN_SPEED_FACTOR);
-  controlMotors(BASE_SPEED, inner);
+  controlMotors(TURN_SPEED, 0);  // Drive left, brake right
 }
 
+// Immediate hard stop — bypasses ramp for safety
 void stopMotors() {
+  targetLeftSpeed  = 0;
+  targetRightSpeed = 0;
+  curLeftSpeed     = 0;
+  curRightSpeed    = 0;
   digitalWrite(MOTOR_A_IN1, LOW);
   digitalWrite(MOTOR_A_IN2, LOW);
   digitalWrite(MOTOR_B_IN3, LOW);
@@ -553,14 +546,12 @@ void processLineFollowing() {
     controlMotors(BASE_SPEED, BASE_SPEED);
   }
   else if (irLeft && !irRight) {
-    // Left off, right on: turn right
-    int inner = (int)(BASE_SPEED * TURN_SPEED_FACTOR);
-    controlMotors(BASE_SPEED, inner);
+    // Left off, right on: turn right — brake right wheel
+    controlMotors(TURN_SPEED, 0);
   }
   else if (!irLeft && irRight) {
-    // Right off, left on: turn left
-    int inner = (int)(BASE_SPEED * TURN_SPEED_FACTOR);
-    controlMotors(inner, BASE_SPEED);
+    // Right off, left on: turn left — brake left wheel
+    controlMotors(0, TURN_SPEED);
   }
   else {
     // Both off line: stop (line lost)
@@ -569,47 +560,17 @@ void processLineFollowing() {
 }
 
 // ============================================================
-// 10. ACTUATOR CONTROL
-// ============================================================
-
-void startActuatorDown() {
-  if (actuatorIsDown) return;  // Already down
-
-  // Save current state to resume after
-  if (currentState == STATE_LINE_SEARCH || currentState == STATE_LINE_FOLLOW || currentState == STATE_MANUAL) {
-    resumeState = currentState;
-  }
-
-  stopMotors();
-  actuatorServo.attach(SERVO_PIN);
-  actuatorServo.write(ACTUATOR_DOWN_ANGLE);
-  actuatorStartTime = millis();
-  currentState = STATE_ACTUATOR_DOWN;
-  espSerial.println(F("A:MOVING"));
-}
-
-void startActuatorUp() {
-  if (!actuatorIsDown) return;  // Already up
-
-  actuatorServo.attach(SERVO_PIN);
-  actuatorServo.write(ACTUATOR_UP_ANGLE);
-  actuatorStartTime = millis();
-  currentState = STATE_ACTUATOR_UP;
-  espSerial.println(F("A:MOVING"));
-}
-
-// ============================================================
-// 11. TELEMETRY
+// 10. TELEMETRY (actuator moved to ESP32)
 // ============================================================
 
 void sendTelemetry() {
-  // Format: T:25.5,H:60.2,M:45,D:15
+  // Format: T:25.5,H:60.2,M:1,D:15  (M: 1=wet 0=dry)
   char tBuf[7], hBuf[7];
   dtostrf(temperature, 4, 1, tBuf);
   dtostrf(humidity, 4, 1, hBuf);
 
   snprintf(telBuf, sizeof(telBuf), "T:%s,H:%s,M:%d,D:%d",
-           tBuf, hBuf, moisturePct, distanceCm);
+           tBuf, hBuf, moistureWet ? 1 : 0, distanceCm);
   espSerial.println(telBuf);
 
   // Small delay to let SoftwareSerial finish transmitting
@@ -627,23 +588,15 @@ void updateLCD() {
     case STATE_LINE_SEARCH:  stateStr = "SRC"; break;
     case STATE_LINE_FOLLOW:  stateStr = "LF"; break;
     case STATE_MANUAL:       stateStr = "MAN"; break;
-    case STATE_ACTUATOR_DOWN:
-    case STATE_ACTUATOR_UP:  stateStr = "ACT"; break;
-    case STATE_MOISTURE_READ:stateStr = "MST"; break;
     default:                 stateStr = "IDL"; break;
   }
   snprintf(lcdLine0, sizeof(lcdLine0), "%-3s D:%3dcm", stateStr, distanceCm > 999 ? 999 : distanceCm);
 
-  // Line 1: Temp + Humidity or Moisture
-  char tBuf[6];
+  // Line 1: Temp + Humidity
+  char tBuf[6], hBuf[6];
   dtostrf(temperature, 4, 1, tBuf);
-  if (actuatorIsDown) {
-    snprintf(lcdLine1, sizeof(lcdLine1), "%sC M:%d%%", tBuf, moisturePct);
-  } else {
-    char hBuf[6];
-    dtostrf(humidity, 4, 1, hBuf);
-    snprintf(lcdLine1, sizeof(lcdLine1), "%sC H:%s%%", tBuf, hBuf);
-  }
+  dtostrf(humidity, 4, 1, hBuf);
+  snprintf(lcdLine1, sizeof(lcdLine1), "%sC H:%s%%", tBuf, hBuf);
 
   lcd.setCursor(0, 0);
   lcd.print(lcdLine0);

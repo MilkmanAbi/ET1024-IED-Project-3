@@ -195,7 +195,7 @@ body{
       <div class="sensor" id="sMoist">
         <div class="icon">&#x1F331;</div>
         <div class="val" id="valMoist">--</div>
-        <div class="lbl">Moisture %</div>
+        <div class="lbl">Moisture</div>
       </div>
       <div class="sensor" id="sDist">
         <div class="icon">&#x1F4CF;</div>
@@ -273,7 +273,7 @@ function sendCmd(cmd) {
 function handleMessage(msg) {
   msg = msg.trim();
 
-  // Telemetry: T:25.5,H:60.2,M:45,D:15
+  // Telemetry: T:25.5,H:60.2,M:1,D:15  (M: 1=moist 0=dry)
   if (msg.indexOf('T:') === 0) {
     var parts = msg.split(',');
     for (var i = 0; i < parts.length; i++) {
@@ -282,7 +282,12 @@ function handleMessage(msg) {
         var k = kv[0], v = kv[1];
         if (k === 'T') document.getElementById('valTemp').textContent = v;
         else if (k === 'H') document.getElementById('valHum').textContent = v;
-        else if (k === 'M') document.getElementById('valMoist').textContent = v;
+        else if (k === 'M') {
+          var wet = (v === '1');
+          document.getElementById('valMoist').textContent = wet ? 'MOIST' : 'DRY';
+          var sm = document.getElementById('sMoist');
+          if (wet) { sm.classList.add('warn'); } else { sm.classList.remove('warn'); }
+        }
         else if (k === 'D') {
           document.getElementById('valDist').textContent = v;
           updateObstacle(parseFloat(v));
