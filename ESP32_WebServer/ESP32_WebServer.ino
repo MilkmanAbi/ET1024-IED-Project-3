@@ -4,9 +4,12 @@
  * WiFi Access Point + WebSocket bridge to Arduino Uno.
  * Serves a responsive web dashboard for robot control and monitoring.
  *
- * Hardware: ESP32 DevKit
- *   Serial2 RX (GPIO16) <- voltage divider <- Arduino TX (A3)
- *   Serial2 TX (GPIO17) -> Arduino RX (A2)
+ * Hardware: NodeMCU-32S
+ *   Serial2 RX (GPIO19) <- voltage divider <- Arduino TX (A3)
+ *   Serial2 TX (GPIO21) -> Arduino RX (A2)
+ *
+ * Wiring:   brown wire = GPIO19 (RX)
+ *           black wire = GPIO21 (TX)
  *
  * Libraries: WiFi.h (built-in), ESPAsyncWebServer, AsyncTCP
  */
@@ -15,13 +18,14 @@
 #include <ESPAsyncWebServer.h>
 #include "web_content.h"
 
+
 // WiFi AP credentials
 const char* AP_SSID = "UrbanFarmBot";
 const char* AP_PASS = "farm1234";
 
-// Serial2 pins for Arduino comms
-#define ARD_RX 16  // ESP32 RX <- Arduino TX
-#define ARD_TX 17  // ESP32 TX -> Arduino RX
+// Serial2 pins for Arduino comms (NodeMCU-32S)
+#define ARD_RX 19  // ESP32 RX (GPIO19, brown) <- Arduino TX (A3)
+#define ARD_TX 21  // ESP32 TX (GPIO21, black) -> Arduino RX (A2)
 #define ARD_BAUD 9600
 
 // Web server + WebSocket
@@ -29,11 +33,15 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
 // Serial buffer from Arduino
-char ardBuf[64];
+char ardBuf[128];
 uint8_t ardIdx = 0;
 
 // Client tracking
 bool clientConnected = false;
+
+// Periodic polling
+unsigned long lastPoll = 0;
+#define POLL_INTERVAL 3000  // Request telemetry every 3s
 
 // ============================================================
 // WebSocket Event Handler
@@ -84,7 +92,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Urban Farm Bot - ESP32 Starting...");
 
-  // Arduino serial link
+  // Arduino serial link (NodeMCU-32S: GPIO19=RX, GPIO21=TX)
   Serial2.begin(ARD_BAUD, SERIAL_8N1, ARD_RX, ARD_TX);
 
   // WiFi Access Point
@@ -103,6 +111,11 @@ void setup() {
 
   server.begin();
   Serial.println("Web server started on port 80");
+
+  // Wait for Arduino to boot, then request initial state
+  delay(2000);
+  Serial2.println("P");
+  Serial.println("Sent initial ping to Arduino");
 }
 
 // ============================================================
@@ -110,6 +123,8 @@ void setup() {
 // ============================================================
 
 void loop() {
+  unsigned long now = millis();
+
   // Read data from Arduino and broadcast to WebSocket clients
   while (Serial2.available()) {
     char c = Serial2.read();
@@ -126,13 +141,22 @@ void loop() {
       }
     } else if (ardIdx < sizeof(ardBuf) - 1) {
       ardBuf[ardIdx++] = c;
+    } else {
+      // Buffer overflow - reset
+      ardIdx = 0;
     }
+  }
+
+  // Periodic telemetry poll - keeps dashboard data fresh
+  if (clientConnected && (now - lastPoll >= POLL_INTERVAL)) {
+    lastPoll = now;
+    Serial2.println("P");
   }
 
   // Periodic WebSocket cleanup
   static unsigned long lastCleanup = 0;
-  if (millis() - lastCleanup > 1000) {
-    lastCleanup = millis();
+  if (now - lastCleanup > 1000) {
+    lastCleanup = now;
     ws.cleanupClients();
   }
 }

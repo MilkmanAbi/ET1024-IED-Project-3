@@ -21,11 +21,11 @@
 #include <Servo.h>
 #include <DHT.h>
 
-// Motor Driver Pins (IED Shield hardwired)
-#define MOTOR_A_IN1       9   // Left motor PWM
-#define MOTOR_A_IN2       6   // Left motor PWM
-#define MOTOR_B_IN3       5   // Right motor PWM
-#define MOTOR_B_IN4       3   // Right motor PWM
+// Motor Driver Pins (IED Shield hardwired - direction swapped to match wiring)
+#define MOTOR_A_IN1       6   // Left motor forward
+#define MOTOR_A_IN2       9   // Left motor reverse
+#define MOTOR_B_IN3       5   // Right motor forward
+#define MOTOR_B_IN4       3   // Right motor reverse
 
 // Ultrasonic Sensor (HC-SR04)
 #define ULTRASONIC_TRIG  11
@@ -64,7 +64,7 @@
 #define MOISTURE_SETTLE_MS  100   // Settle time after powering moisture sensor
 
 // Motor speeds
-#define BASE_SPEED         150
+#define BASE_SPEED         255
 #define TURN_SPEED_FACTOR  0.4f  // Inner wheel at 40% for smooth turns
 
 // Sensor intervals (ms)
@@ -86,6 +86,7 @@
 // State machine
 enum RobotState {
   STATE_IDLE,
+  STATE_LINE_SEARCH,
   STATE_LINE_FOLLOW,
   STATE_MANUAL,
   STATE_ACTUATOR_DOWN,
@@ -93,8 +94,8 @@ enum RobotState {
   STATE_MOISTURE_READ
 };
 
-RobotState currentState = STATE_IDLE;
-RobotState resumeState  = STATE_IDLE;  // State to return to after actuator ops
+RobotState currentState = STATE_MANUAL;
+RobotState resumeState  = STATE_MANUAL;  // State to return to after actuator ops
 
 // Objects
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -115,6 +116,9 @@ bool  irRight     = false;
 
 // Actuator
 bool actuatorIsDown = false;
+
+// Obstacle reporting (avoid spamming)
+bool obstacleSent = false;
 
 // Timing (millis-based, non-blocking)
 unsigned long lastIRRead        = 0;
@@ -181,8 +185,15 @@ void setup() {
   Serial.println(F("Urban Farm Robot ready"));
 #endif
 
-  delay(1000);
+  delay(1500);
   lcd.clear();
+
+  // Send initial state so ESP32 knows we're alive
+  readDHT();
+  distanceCm = readUltrasonic();
+  sendTelemetry();
+  espSerial.println(F("MODE:MAN"));
+  espSerial.println(F("A:UP"));
 }
 
 // ============================================================
@@ -197,6 +208,34 @@ void loop() {
 
   // State-dependent processing
   switch (currentState) {
+    case STATE_LINE_SEARCH:
+      // Move forward until an IR sensor detects the black line
+      if (now - lastUltrasonic >= ULTRASONIC_INTERVAL) {
+        lastUltrasonic = now;
+        distanceCm = readUltrasonic();
+      }
+      if (distanceCm < OBSTACLE_DIST_CM) {
+        stopMotors();
+        if (!obstacleSent) {
+          espSerial.println(F("K:OBSTACLE"));
+          obstacleSent = true;
+        }
+      } else {
+        obstacleSent = false;
+        controlMotors(BASE_SPEED, BASE_SPEED);  // Drive forward
+        if (now - lastIRRead >= IR_INTERVAL) {
+          lastIRRead = now;
+          readIRSensors();
+          if (irLeft || irRight) {
+            // Line found - switch to line following
+            currentState = STATE_LINE_FOLLOW;
+            resumeState = STATE_LINE_FOLLOW;
+            espSerial.println(F("MODE:LF"));
+          }
+        }
+      }
+      break;
+
     case STATE_LINE_FOLLOW:
       if (now - lastIRRead >= IR_INTERVAL) {
         lastIRRead = now;
@@ -209,7 +248,12 @@ void loop() {
       // Obstacle override
       if (distanceCm < OBSTACLE_DIST_CM) {
         stopMotors();
+        if (!obstacleSent) {
+          espSerial.println(F("K:OBSTACLE"));
+          obstacleSent = true;
+        }
       } else {
+        obstacleSent = false;
         processLineFollowing();
       }
       break;
@@ -229,6 +273,7 @@ void loop() {
     case STATE_ACTUATOR_DOWN:
       if (now - actuatorStartTime >= ACTUATOR_TRAVEL_MS) {
         actuatorIsDown = true;
+        actuatorServo.detach();  // Restore Timer1 PWM on D9/D10
         espSerial.println(F("A:DOWN"));
         // Auto-trigger moisture read
         digitalWrite(MOISTURE_POWER, HIGH);
@@ -364,10 +409,36 @@ void processCommand(const char* cmd) {
       stopMotors();
       espSerial.println(F("K:OK"));
       break;
+    case 'G':
+      // Start: search for line then follow
+      stopMotors();
+      currentState = STATE_LINE_SEARCH;
+      resumeState = STATE_LINE_SEARCH;
+      espSerial.println(F("MODE:SEARCH"));
+      espSerial.println(F("K:OK"));
+      break;
+    case 'X':
+      // Stop: go to manual mode
+      stopMotors();
+      currentState = STATE_MANUAL;
+      resumeState = STATE_MANUAL;
+      espSerial.println(F("MODE:MAN"));
+      espSerial.println(F("K:OK"));
+      break;
     case 'P':
       readDHT();
       distanceCm = readUltrasonic();
       sendTelemetry();
+      // Also send current mode and actuator state
+      if (currentState == STATE_MANUAL || currentState == STATE_IDLE) {
+        espSerial.println(F("MODE:MAN"));
+      } else if (currentState == STATE_LINE_SEARCH) {
+        espSerial.println(F("MODE:SEARCH"));
+      } else {
+        espSerial.println(F("MODE:LF"));
+      }
+      delay(5);
+      espSerial.println(actuatorIsDown ? F("A:DOWN") : F("A:UP"));
       break;
     default:
 #ifdef DEBUG
@@ -383,6 +454,11 @@ void processCommand(const char* cmd) {
 // ============================================================
 
 void controlMotors(int leftSpeed, int rightSpeed) {
+  // Detach servo to restore Timer1 PWM on pin 9 (left motor)
+  if (actuatorServo.attached()) {
+    actuatorServo.detach();
+  }
+
   // Left Motor
   if (leftSpeed > 0) {
     analogWrite(MOTOR_A_IN1, leftSpeed);
@@ -500,7 +576,7 @@ void startActuatorDown() {
   if (actuatorIsDown) return;  // Already down
 
   // Save current state to resume after
-  if (currentState == STATE_LINE_FOLLOW || currentState == STATE_MANUAL) {
+  if (currentState == STATE_LINE_SEARCH || currentState == STATE_LINE_FOLLOW || currentState == STATE_MANUAL) {
     resumeState = currentState;
   }
 
@@ -535,6 +611,9 @@ void sendTelemetry() {
   snprintf(telBuf, sizeof(telBuf), "T:%s,H:%s,M:%d,D:%d",
            tBuf, hBuf, moisturePct, distanceCm);
   espSerial.println(telBuf);
+
+  // Small delay to let SoftwareSerial finish transmitting
+  delay(10);
 }
 
 // ============================================================
@@ -545,6 +624,7 @@ void updateLCD() {
   // Line 0: State + distance
   const char* stateStr;
   switch (currentState) {
+    case STATE_LINE_SEARCH:  stateStr = "SRC"; break;
     case STATE_LINE_FOLLOW:  stateStr = "LF"; break;
     case STATE_MANUAL:       stateStr = "MAN"; break;
     case STATE_ACTUATOR_DOWN:
@@ -577,6 +657,10 @@ void updateLCD() {
 
 void updateLED(unsigned long now) {
   switch (currentState) {
+    case STATE_LINE_SEARCH:
+      // Fast blink while searching
+      digitalWrite(LED_PIN, (now / 200) % 2);
+      break;
     case STATE_LINE_FOLLOW:
       // Blink every 500ms
       digitalWrite(LED_PIN, (now / 500) % 2);

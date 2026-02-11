@@ -52,25 +52,22 @@ body{
 }
 .card h2{font-size:14px;color:var(--dim);margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
 
-/* Mode Toggle */
-.mode-toggle{
-  display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;
+/* Mode Section */
+.mode-section{margin-bottom:12px}
+.mode-status{
+  display:flex;align-items:center;gap:8px;margin-bottom:10px;
+  font-size:15px;
 }
-.mode-label{font-size:16px;font-weight:500}
-.switch{
-  position:relative;width:52px;height:28px;cursor:pointer;
+.mode-controls{display:flex;gap:8px}
+.mode-btn{
+  flex:1;padding:12px 8px;border:none;border-radius:10px;
+  font-size:14px;font-weight:600;cursor:pointer;color:#fff;
+  transition:all .15s;
 }
-.switch input{display:none}
-.slider{
-  position:absolute;inset:0;background:var(--green);border-radius:28px;transition:.3s;
-}
-.slider::before{
-  content:'';position:absolute;width:22px;height:22px;
-  left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s;
-}
-.switch input:checked+.slider{background:var(--accent)}
-.switch input:checked+.slider::before{transform:translateX(24px)}
-.mode-text{font-size:13px;color:var(--dim)}
+.mode-btn:active{transform:scale(0.95)}
+.mode-btn:disabled{opacity:0.3;cursor:not-allowed}
+.start-btn{background:var(--green)}
+.stop-btn{background:var(--red)}
 
 /* Sensor Grid */
 .sensors{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -83,19 +80,24 @@ body{
 .sensor.warn{border:1px solid var(--orange)}
 .sensor.danger{border:1px solid var(--red)}
 
+/* Badges */
+.badge{
+  padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;
+  text-transform:uppercase;
+}
+.badge.man{background:#3498db33;color:var(--accent)}
+.badge.search{background:#e67e2233;color:var(--orange)}
+.badge.lf{background:#2ecc7133;color:var(--green)}
+.badge.up{background:#2ecc7133;color:var(--green)}
+.badge.down{background:#e67e2233;color:var(--orange)}
+.badge.moving{background:#3498db33;color:var(--accent)}
+
 /* Actuator Badge */
 .actuator-status{
   display:flex;align-items:center;justify-content:center;
   gap:8px;margin-top:10px;padding:8px;
   background:#ffffff08;border-radius:8px;font-size:14px;
 }
-.badge{
-  padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;
-  text-transform:uppercase;
-}
-.badge.up{background:#2ecc7133;color:var(--green)}
-.badge.down{background:#e67e2233;color:var(--orange)}
-.badge.moving{background:#3498db33;color:var(--accent)}
 
 /* D-Pad */
 .dpad{
@@ -112,7 +114,7 @@ body{
   -webkit-user-select:none;user-select:none;
   touch-action:none;
 }
-.dpad button:active{transform:scale(0.92)}
+.dpad button:active:not(:disabled){transform:scale(0.92)}
 .btn-up{grid-area:up;background:var(--accent)}
 .btn-down{grid-area:down;background:var(--accent)}
 .btn-left{grid-area:left;background:var(--accent)}
@@ -129,7 +131,7 @@ body{
   font-size:14px;font-weight:600;cursor:pointer;color:#fff;
   transition:all .15s;max-width:160px;
 }
-.act-btn:active{transform:scale(0.95)}
+.act-btn:active:not(:disabled){transform:scale(0.95)}
 .act-btn:disabled{opacity:0.3;cursor:not-allowed}
 .act-down{background:var(--orange)}
 .act-up{background:var(--green)}
@@ -169,14 +171,15 @@ body{
   <div class="card">
     <h2>Dashboard</h2>
 
-    <div class="mode-toggle">
-      <span class="mode-label" id="modeLabel">Line Follow</span>
-      <label class="switch">
-        <input type="checkbox" id="modeSwitch">
-        <span class="slider"></span>
-      </label>
+    <div class="mode-section">
+      <div class="mode-status">
+        Mode: <span class="badge man" id="modeBadge">MANUAL</span>
+      </div>
+      <div class="mode-controls">
+        <button class="mode-btn start-btn" id="btnStart">Start Line Follow</button>
+        <button class="mode-btn stop-btn" id="btnStop" disabled>Stop</button>
+      </div>
     </div>
-    <div class="mode-text" id="modeDesc">Auto-driving along line</div>
 
     <div class="sensors">
       <div class="sensor" id="sTemp">
@@ -223,22 +226,22 @@ body{
     </div>
 
     <div class="act-controls">
-      <button class="act-btn act-down" id="btnActDown" onclick="sendCmd('D:1')">Push Down</button>
-      <button class="act-btn act-up" id="btnActUp" onclick="sendCmd('D:0')" disabled>Pull Up</button>
+      <button class="act-btn act-down" id="btnActDown">Push Down</button>
+      <button class="act-btn act-up" id="btnActUp" disabled>Pull Up</button>
     </div>
   </div>
 </div>
 
 <script>
 // State
-let ws = null;
-let isManual = false;
-let actState = 'UP';
-let reconnTimer = null;
+var ws = null;
+var currentMode = 'MAN';  // MAN, SEARCH, LF
+var actState = 'UP';
+var reconnTimer = null;
 
 // WebSocket
 function connect() {
-  const host = location.hostname || '192.168.4.1';
+  var host = location.hostname || '192.168.4.1';
   ws = new WebSocket('ws://' + host + '/ws');
 
   ws.onopen = function() {
@@ -271,12 +274,12 @@ function handleMessage(msg) {
   msg = msg.trim();
 
   // Telemetry: T:25.5,H:60.2,M:45,D:15
-  if (msg.startsWith('T:')) {
-    const parts = msg.split(',');
-    parts.forEach(function(p) {
-      const kv = p.split(':');
+  if (msg.indexOf('T:') === 0) {
+    var parts = msg.split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].split(':');
       if (kv.length === 2) {
-        const k = kv[0], v = kv[1];
+        var k = kv[0], v = kv[1];
         if (k === 'T') document.getElementById('valTemp').textContent = v;
         else if (k === 'H') document.getElementById('valHum').textContent = v;
         else if (k === 'M') document.getElementById('valMoist').textContent = v;
@@ -285,21 +288,20 @@ function handleMessage(msg) {
           updateObstacle(parseFloat(v));
         }
       }
-    });
+    }
     return;
   }
 
   // Actuator state
-  if (msg.startsWith('A:')) {
+  if (msg.indexOf('A:') === 0) {
     actState = msg.substring(2);
     updateActuator(actState);
     return;
   }
 
   // Mode
-  if (msg.startsWith('MODE:')) {
-    const mode = msg.substring(5);
-    isManual = (mode === 'MAN');
+  if (msg.indexOf('MODE:') === 0) {
+    currentMode = msg.substring(5);
     updateModeUI();
     return;
   }
@@ -311,8 +313,8 @@ function handleMessage(msg) {
 }
 
 function updateObstacle(dist) {
-  const el = document.getElementById('obstacleWarn');
-  const sd = document.getElementById('sDist');
+  var el = document.getElementById('obstacleWarn');
+  var sd = document.getElementById('sDist');
   if (dist < 20) {
     el.classList.add('show');
     sd.classList.add('danger');
@@ -329,7 +331,7 @@ function updateObstacle(dist) {
 }
 
 function updateActuator(state) {
-  const badge = document.getElementById('actBadge');
+  var badge = document.getElementById('actBadge');
   badge.textContent = state;
   badge.className = 'badge ' + state.toLowerCase();
 
@@ -338,50 +340,77 @@ function updateActuator(state) {
 }
 
 function updateModeUI() {
-  const sw = document.getElementById('modeSwitch');
-  sw.checked = isManual;
-  document.getElementById('modeLabel').textContent = isManual ? 'Manual' : 'Line Follow';
-  document.getElementById('modeDesc').textContent = isManual ? 'Control with D-pad' : 'Auto-driving along line';
+  var badge = document.getElementById('modeBadge');
+  var btnStart = document.getElementById('btnStart');
+  var btnStop = document.getElementById('btnStop');
+  var isManual = (currentMode === 'MAN');
 
-  // Disable D-pad in line-follow mode
-  const btns = document.querySelectorAll('.dpad button');
-  btns.forEach(function(b) { b.disabled = !isManual; });
+  if (currentMode === 'MAN') {
+    badge.textContent = 'MANUAL';
+    badge.className = 'badge man';
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  } else if (currentMode === 'SEARCH') {
+    badge.textContent = 'SEARCHING';
+    badge.className = 'badge search';
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  } else {
+    badge.textContent = 'LINE FOLLOW';
+    badge.className = 'badge lf';
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  }
+
+  // D-pad only works in manual mode
+  var btns = document.querySelectorAll('.dpad button');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].disabled = !isManual;
+  }
 }
 
-// Mode toggle
-document.getElementById('modeSwitch').addEventListener('change', function() {
-  isManual = this.checked;
-  sendCmd(isManual ? 'M:1' : 'M:0');
-  updateModeUI();
+// Start / Stop buttons
+document.getElementById('btnStart').addEventListener('click', function() {
+  sendCmd('G');
+});
+document.getElementById('btnStop').addEventListener('click', function() {
+  sendCmd('X');
+});
+
+// Actuator buttons
+document.getElementById('btnActDown').addEventListener('click', function() {
+  sendCmd('D:1');
+});
+document.getElementById('btnActUp').addEventListener('click', function() {
+  sendCmd('D:0');
 });
 
 // D-Pad: hold-to-move
 (function() {
-  const btns = document.querySelectorAll('.dpad button[data-cmd]');
-  btns.forEach(function(btn) {
-    const cmd = btn.getAttribute('data-cmd');
+  var btns = document.querySelectorAll('.dpad button[data-cmd]');
+  for (var i = 0; i < btns.length; i++) {
+    (function(btn) {
+      var cmd = btn.getAttribute('data-cmd');
 
-    function start(e) {
-      e.preventDefault();
-      if (btn.disabled) return;
-      if (cmd === 'S') {
-        sendCmd('S');
-      } else {
+      function start(e) {
+        e.preventDefault();
+        if (btn.disabled) return;
         sendCmd(cmd);
       }
-    }
-    function stop(e) {
-      e.preventDefault();
-      if (cmd !== 'S') sendCmd('S');
-    }
+      function stop(e) {
+        e.preventDefault();
+        if (btn.disabled) return;
+        if (cmd !== 'S') sendCmd('S');
+      }
 
-    btn.addEventListener('mousedown', start);
-    btn.addEventListener('mouseup', stop);
-    btn.addEventListener('mouseleave', stop);
-    btn.addEventListener('touchstart', start, {passive:false});
-    btn.addEventListener('touchend', stop, {passive:false});
-    btn.addEventListener('touchcancel', stop, {passive:false});
-  });
+      btn.addEventListener('mousedown', start);
+      btn.addEventListener('mouseup', stop);
+      btn.addEventListener('mouseleave', stop);
+      btn.addEventListener('touchstart', start, {passive:false});
+      btn.addEventListener('touchend', stop, {passive:false});
+      btn.addEventListener('touchcancel', stop, {passive:false});
+    })(btns[i]);
+  }
 })();
 
 // Init
