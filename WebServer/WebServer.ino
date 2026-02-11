@@ -1,5 +1,5 @@
 /*
- * Urban Farming Robot - ESP32 WebServer
+ * Urban Farming Robot - WebServer
  *
  * WiFi Access Point + WebSocket bridge to Arduino Uno.
  * Serves a responsive web dashboard for robot control and monitoring.
@@ -26,8 +26,8 @@ const char* AP_SSID = "UrbanFarmBot";
 const char* AP_PASS = "farm1234";
 
 // Serial2 pins for Arduino comms (NodeMCU-32S)
-#define ARD_RX 19  // ESP32 RX (GPIO19, brown) <- Arduino TX (A3)
-#define ARD_TX 21  // ESP32 TX (GPIO21, black) -> Arduino RX (A2)
+#define ARD_RX 19  // RX (GPIO19, brown) <- Arduino TX (A3)
+#define ARD_TX 21  // TX (GPIO21, black) -> Arduino RX (A2)
 #define ARD_BAUD 9600
 
 // Servo on GPIO23 (MG996R 360° continuous rotation — tuned values)
@@ -60,7 +60,7 @@ unsigned long lastPoll = 0;
 unsigned long lastHeartbeat = 0;
 #define HEARTBEAT_INTERVAL 1000  // Send 'H' every 1s
 
-// Actuator state machine (runs on ESP32)
+// Actuator state machine (runs)
 enum ActState { ACT_IDLE, ACT_MOVING_DOWN, ACT_MOVING_UP };
 ActState actState = ACT_IDLE;
 bool actuatorIsDown = false;
@@ -135,7 +135,7 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
       clientConnected = true;
       // Request current state from Arduino
       Serial2.println("P");
-      // Send actuator state (ESP32 owns this now)
+      // Send actuator state (owns this now)
       delay(10);
       client->text(actuatorIsDown ? "A:DOWN" : "A:UP");
       break;
@@ -159,9 +159,9 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
         memcpy(cmd, data, copyLen);
         cmd[copyLen] = '\0';
 
-        // Actuator commands — handle locally on ESP32
+        // Actuator commands — handle locally on
         if (cmd[0] == 'D' && cmd[1] == ':') {
-          Serial.printf("WS -> ESP32 actuator: %s\n", cmd);
+          Serial.printf("WS -> actuator: %s\n", cmd);
           if (cmd[2] == '1') startActuatorDown();
           else if (cmd[2] == '0') startActuatorUp();
           break;
@@ -185,7 +185,7 @@ void onWsEvent(AsyncWebSocket* srv, AsyncWebSocketClient* client,
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Urban Farm Bot - ESP32 Starting...");
+  Serial.println("Urban Farm Bot - Starting...");
 
   // Arduino serial link (NodeMCU-32S: GPIO19=RX, GPIO21=TX)
   Serial2.begin(ARD_BAUD, SERIAL_8N1, ARD_RX, ARD_TX);

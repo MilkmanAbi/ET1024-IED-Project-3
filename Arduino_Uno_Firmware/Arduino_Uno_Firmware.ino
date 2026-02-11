@@ -5,9 +5,9 @@
  * Sensors: DHT22, HC-SR04 Ultrasonic, IR Line Trackers x2, Digital Moisture
  * Actuators: 2x DC Motors (H-bridge)
  * Display: 16x2 I2C LCD
- * Comms: SoftwareSerial to ESP32 (9600 baud)
+ * Comms: SoftwareSerial to  (9600 baud)
  *
- * Servo/actuator moved to ESP32 (GPIO23) to avoid Timer1 conflict with D9 PWM.
+ * Servo/actuator moved to  (GPIO23) to avoid Timer1 conflict with D9 PWM.
  */
 
 // ============================================================
@@ -43,9 +43,9 @@
 // LED Indicator
 #define LED_PIN          13
 
-// ESP32 Comms
-#define ESP_RX           A2   // Arduino RX <- ESP32 TX
-#define ESP_TX           A3   // Arduino TX -> ESP32 RX
+//  Comms
+#define ESP_RX           A2   // Arduino RX <-  TX
+#define ESP_TX           A3   // Arduino TX ->  RX
 
 // ============================================================
 // 2. CONSTANTS
@@ -53,14 +53,14 @@
 
 // Motor speeds
 #define BASE_SPEED         120   // Used by line-follow / search
-#define MANUAL_SPEED       130   // Reduced for manual to avoid ESP32 brownout
+#define MANUAL_SPEED       130   // Reduced for manual to avoid  brownout
 #define TURN_SPEED         120    // Outer wheel speed during turns (inner brakes)
 
 // Motor ramping (soft-start to limit inrush current)
 #define RAMP_STEP           10   // PWM increment per tick
 #define RAMP_INTERVAL_MS    20   // ms between ramp ticks (~280ms 0→100)
 
-// ESP32 heartbeat watchdog
+//  heartbeat watchdog
 #define HEARTBEAT_TIMEOUT 5000   // Stop motors if no heartbeat for 5s
 
 // Sensor intervals (ms)
@@ -104,7 +104,7 @@ int curLeftSpeed     = 0;
 int curRightSpeed    = 0;
 unsigned long lastRampTime = 0;
 
-// ESP32 heartbeat watchdog
+//  heartbeat watchdog
 unsigned long lastHeartbeat = 0;
 
 // Sensor data
@@ -172,7 +172,7 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print(F("Initialising..."));
 
-  // ESP32 serial
+  //  serial
   espSerial.begin(9600);
 
 #ifdef DEBUG
@@ -185,7 +185,7 @@ void setup() {
 
   lastHeartbeat = millis();  // Grace period on boot
 
-  // Send initial state so ESP32 knows we're alive
+  // Send initial state so knows we're alive
   readDHT();
   distanceCm = readUltrasonic();
   sendTelemetry();
@@ -205,10 +205,10 @@ void loop() {
   // Motor soft-ramp: gradually move current PWM toward target
   updateMotorRamp(now);
 
-  // Heartbeat watchdog: if ESP32 went silent, stop motors (likely brownout)
+  // Heartbeat watchdog: if went silent, stop motors (likely brownout)
   if (motorsRunning && (now - lastHeartbeat > HEARTBEAT_TIMEOUT)) {
     stopMotors();
-    espSerial.println(F("K:WDOG"));  // Tell ESP32 watchdog triggered
+    espSerial.println(F("K:WDOG"));  // Tell watchdog triggered
   }
 
   // State-dependent processing
@@ -264,7 +264,7 @@ void loop() {
       break;
 
     case STATE_MANUAL:
-      // Motors controlled by ESP32 commands; safety check
+      // Motors controlled by commands; safety check
       if (now - lastUltrasonic >= ULTRASONIC_INTERVAL) {
         lastUltrasonic = now;
         distanceCm = readUltrasonic();
@@ -345,7 +345,7 @@ void processCommand(const char* cmd) {
     return;
   }
 
-  // Heartbeat from ESP32
+  // Heartbeat
   if (cmd[0] == 'H' && cmd[1] == '\0') {
     lastHeartbeat = millis();
     return;
@@ -560,7 +560,7 @@ void processLineFollowing() {
 }
 
 // ============================================================
-// 10. TELEMETRY (actuator moved to ESP32)
+// 10. TELEMETRY (actuator moved)
 // ============================================================
 
 void sendTelemetry() {
