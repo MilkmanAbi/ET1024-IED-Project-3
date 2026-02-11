@@ -1,39 +1,43 @@
-// Pins
-const int trigPin = 10;
-const int echoPin = 11;
+const byte TRIG_PIN = 11;
+const byte ECHO_PIN = 10;
 
 void setup() {
-  Serial.begin(9600);  // Serial at 9600 baud
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
+  Serial.begin(115200);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+}
+
+float readDistanceCM() {
+  // Clear trigger
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(5);
+
+  // 10 µs pulse
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // Read echo (timeout after 30ms ~ 5 meters)
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+  if (duration == 0) {
+    return -1;  // No echo
+  }
+
+  return duration * 0.0343 / 2.0;
 }
 
 void loop() {
-  long duration;
-  float distanceCm;
+  float distance = readDistanceCM();
 
-  // Send a 10 µs pulse to trigger
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  // Read the echo pulse duration
-  duration = pulseIn(echoPin, HIGH);
-
-  // Convert to distance in cm
-  distanceCm = duration * 0.034 / 2;  // Sound speed: 343 m/s
-
-  // Print distance
-  Serial.print("Distance: ");
-  Serial.print(distanceCm);
-  Serial.println(" cm");
-
-  // Presence check (example: object closer than 50 cm)
-  if (distanceCm > 0 && distanceCm < 50) {
-    Serial.println("Object detected!");
+  if (distance < 0) {
+    Serial.println("No echo");
+  } else {
+    Serial.print("Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
   }
 
-  delay(500);  // half-second delay between readings
+  delay(300);
 }
+
