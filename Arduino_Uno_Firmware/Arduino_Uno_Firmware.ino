@@ -52,8 +52,8 @@
 // ============================================================
 
 // Motor speeds
-#define BASE_SPEED         120   // Used by line-follow / search
-#define MANUAL_SPEED       130   // Reduced for manual to avoid  brownout
+#define BASE_SPEED         140   // Used by line-follow / search
+#define MANUAL_SPEED       140   // Reduced for manual to avoid  brownout
 #define TURN_SPEED         120    // Outer wheel speed during turns (inner brakes)
 
 // Motor ramping (soft-start to limit inrush current)
